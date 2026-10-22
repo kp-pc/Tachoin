@@ -52,14 +52,21 @@ def cmd_create_wallet(args: argparse.Namespace) -> None:
     print(f"New {TOKEN_SYMBOL} wallet\n")
     print(f"  Address    : {wallet.address}")
     print(f"  Public key : {wallet.public_key_hex}")
-    print(f"  Seed (hex) : {wallet.seed_hex}")
     print()
     print("Anyone holding the seed can spend this wallet's funds.")
 
     if args.save:
+        # Require passphrase for security - never save plaintext seeds
+        if not args.passphrase:
+            _fail("Wallet files must be protected with a passphrase. Use --passphrase or --passphrase-file.")
         path = wallet.save(args.save, args.passphrase)
         protection = "sealed with a passphrase" if args.passphrase else "UNENCRYPTED"
         print(f"Saved to {path} ({protection}).")
+        
+        # Provide limited export option only when explicitly requested
+        if args.export_seed:
+            print(f"\n⚠️  WARNING: Seed export requested. Share responsibly!")
+            print(f"Seed (hex) : {wallet.seed_hex}")
 
 
 def cmd_show_wallet(args: argparse.Namespace) -> None:
@@ -214,6 +221,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("create-wallet", help="generate a wallet")
     p.add_argument("--save", default=None, metavar="PATH", help="write the wallet here")
     p.add_argument("--passphrase", default=None, help="encrypt the saved seed")
+    p.add_argument(
+        "--export-seed",
+        action="store_true",
+        default=False,
+        help="print seed hex (use with caution; never share!)",
+    )
     p.set_defaults(func=cmd_create_wallet)
 
     p = sub.add_parser("show-wallet", help="print a wallet file's public data")

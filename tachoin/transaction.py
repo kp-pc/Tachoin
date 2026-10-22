@@ -18,8 +18,17 @@ ensure_tachyon()
 
 from tachyon.encoding import canonical_json
 
-from .config import MAX_TRANSFER_AMOUNT, TRANSFER_FEE
+from .config import MAX_TRANSFER_AMOUNT, TRANSFER_FEE, SLOT_FRESHNESS_SLOTS
 from .wallet import TachoinWallet, is_valid_address
+from .transaction_schemas import (
+    PROGRAM_TRANSFER,
+    PROGRAM_MINT,
+    PROGRAM_BURN,
+    PROGRAM_STAKE,
+    PROGRAM_UNSTAKE,
+    validate_payload_schema,
+    TransactionError,
+)
 
 #: Program identifiers.  Tachyon sees them as ``tachoin_<program>``.
 PROGRAM_TRANSFER = "transfer"
@@ -106,15 +115,23 @@ def encode_unstake(amount: int, validator: str = "") -> bytes:
 
 
 def decode_payload(program: str, payload: bytes) -> Dict[str, Any]:
-    """Decode and sanity-check a payload for ``program``."""
+    """Decode and validate a payload for ``program`` using strict schema."""
     try:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TransactionError("instruction payload is not valid JSON") from exc
-    if not isinstance(data, dict) or data.get("type") != program:
+    
+    if not isinstance(data, dict):
+        raise TransactionError("payload must be a JSON object")
+        
+    if data.get("type") != program:
         raise TransactionError(
-            f"payload type does not match program {program!r}"
+            f"payload type '{data.get('type')}' does not match program {program!r}"
         )
+    
+    # Use schema validation for strict field checking
+    validate_payload_schema(program, data)
+    
     return data
 
 

@@ -47,6 +47,7 @@ from .config import (
     TOKEN_DECIMALS,
     TRANSFER_FEE,
     balance_key,
+    delegation_key,
     nonce_key,
     stake_key,
     validator_stake_key,
@@ -318,9 +319,20 @@ class TachoinNode:
         if not tx.verify():
             return self._result(tx, False, "invalid signature")
 
-        # Slot freshness: reject transactions signed more than
-        # SLOT_FRESHNESS_SLOTS ahead of the current slot.  This prevents
-        # replay of stale, pre-signed transactions that carry old fee values.
+        # Slot freshness: enforce both upper and lower bounds so a
+        # transaction cannot be replayed from a slot more than
+        # SLOT_FRESHNESS_SLOTS ago and cannot be front-run by jumping
+        # far ahead into the future.  The lower-bound check is critical
+        # because it also closes the fee-evasion vector where a client
+        # submits a transaction at a stale slot whose base fee is lower
+        # than the current one.
+        if tx.slot < self._current_slot - SLOT_FRESHNESS_SLOTS:
+            return self._result(
+                tx,
+                False,
+                f"slot {tx.slot} is too old "
+                f"(current={self._current_slot}, min={self._current_slot - SLOT_FRESHNESS_SLOTS})",
+            )
         if tx.slot > self._current_slot + SLOT_FRESHNESS_SLOTS:
             return self._result(
                 tx,
@@ -329,16 +341,19 @@ class TachoinNode:
                 f"(current={self._current_slot}, max={self._current_slot + SLOT_FRESHNESS_SLOTS})",
             )
 
+        # Nonce validation (replay protection)
+        expected = self.get_nonce(tx.sender)
+        if tx.nonce != expected:
+            return self._result(
+                tx,
+                False,
+                f"nonce {tx.nonce} does not match expected {expected} (replay attack or stale transaction)",
+            )
+
         # Mempool bound: reject new work when the pending queue is full so a
         # flood cannot exhaust node memory before the next block drains it.
         if len(self._pending) >= MAX_PENDING_TXS:
             return self._result(tx, False, "mempool is full")
-
-        expected = self.get_nonce(tx.sender)
-        if tx.nonce != expected:
-            return self._result(
-                tx, False, f"invalid nonce: expected {expected}, got {tx.nonce}"
-            )
 
         handler = {
             PROGRAM_TRANSFER: self._apply_transfer,
@@ -465,6 +480,14 @@ class TachoinNode:
             validator_stake_key(validator),
             int_to_bytes(self.get_validator_stake(validator) + amount),
         )
+        # Record explicit delegation for validation during unstake.
+        self.state.set(
+            delegation_key(tx.sender, validator),
+            int_to_bytes(
+                bytes_to_int(self.state.get(delegation_key(tx.sender, validator), b"\x00"))
+                + amount,
+            ),
+        )
         # Ledger sync deferred to produce_block to keep SMT and ledger in lock-step.
         return None
 
@@ -479,9 +502,18 @@ class TachoinNode:
         validator = data.get("validator") or tx.sender
         if amount <= 0:
             return "unstake amount must be positive"
+        
+        # Check personal stake sufficiency (as before)
         staked = self.get_stake(tx.sender)
         if staked < amount:
             return "insufficient stake to unstake"
+        
+        # NEW: Verify the delegator has staked with this specific validator.
+        # Read the delegation record for (delegator, validator) pair.
+        delegation_key_bytes = delegation_key(tx.sender, validator)
+        current_delegation = bytes_to_int(self.state.get(delegation_key_bytes, b"\x00"))
+        if current_delegation < amount:
+            return "insufficient delegation to this validator"
 
         self._credit(tx.sender, amount)
         self.state.set(stake_key(tx.sender), int_to_bytes(staked - amount))
@@ -492,6 +524,11 @@ class TachoinNode:
             int_to_bytes(
                 max(0, self.get_validator_stake(validator) - amount)
             ),
+        )
+        # Update the delegation ledger to reflect the reduced delegation.
+        self.state.set(
+            delegation_key_bytes,
+            int_to_bytes(max(0, current_delegation - amount)),
         )
         # Ledger sync deferred to produce_block to keep SMT and ledger in lock-step.
         return None

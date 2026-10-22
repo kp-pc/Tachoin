@@ -218,12 +218,10 @@ class TachoinWallet:
             "public_key": self.public_key_hex,
             "network": "tachoin",
         }
-        if passphrase:
-            payload["sealed"] = True
-            payload["seed"] = _seal(passphrase, self._seed, self.address)
-        else:
-            payload["sealed"] = False
-            payload["seed_hex"] = self.seed_hex
+        if not passphrase:
+            raise ValueError("Wallet must be encrypted with a passphrase to be saved.")
+        payload["sealed"] = True
+        payload["seed"] = _seal(passphrase, self._seed, self.address)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")

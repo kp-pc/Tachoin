@@ -124,3 +124,15 @@ def validator_stake_key(address: str) -> bytes:
 def nonce_key(address: str) -> bytes:
     """Sparse Merkle tree key holding ``address``'s next expected nonce."""
     return digest("tachoin_nonce", address.encode("utf-8"))
+
+
+def delegation_key(delegator: str, validator: str) -> bytes:
+    """Sparse Merkle tree key holding TACH ``delegator`` has staked with ``validator``.
+
+    This enables per-validator unstake validation and prevents cross-validator
+    stake manipulation.
+    """
+    return digest(
+        "tachoin_delegation",
+        f"{delegator}:{validator}".encode("utf-8")
+    )
