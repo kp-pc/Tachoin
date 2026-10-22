@@ -1,16 +1,16 @@
-"""Tachoin CLI entry point.
+"""Tachoin command line interface.
 
-Usage:
-    python -m tachoin create-wallet
+Examples::
+
+    python -m tachoin create-wallet --save wallet.json
     python -m tachoin status
-    python -m tachoin balance <address>
-    python -m tachoin transfer <to> <amount>
-    python -m tachoin mint <amount>          # validator only
-    python -m tachoin burn <amount>
-    python -m tachoin stake <amount> [validator]
-    python -m tachoin unstake <amount> [validator]
     python -m tachoin supply
-    python -m tachoin run [--blocks N] [--txs-per-block M]
+    python -m tachoin transfer <address> 10
+    python -m tachoin run --blocks 20 --txs-per-block 5
+
+Every command operates on an in-process simulation node with a freshly
+generated validator set, unless validator seeds are supplied with
+``--seeds``.
 """
 
 from __future__ import annotations
@@ -18,267 +18,269 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import os
-
-# Add Tachyon to path
-_TACHYON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tachyon-blockchain")
-if _TACHYON_PATH not in sys.path:
-    sys.path.insert(0, _TACHYON_PATH)
-
-from tachyon.crypto import KeyPair
-
-from .client import TachoinClient
-from .wallet import TachoinWallet
-from .config import TOKEN_DECIMALS, GENESIS_REWARD_POOL
 import time
+from typing import Any, Dict, List, Optional
+
+from . import __version__
+from .client import TachoinClient
+from .config import TOKEN_SYMBOL
+from .wallet import TachoinWallet
+
+
+def _client(args: argparse.Namespace) -> TachoinClient:
+    """Build a client from ``--seeds`` or a fresh validator set."""
+    seeds: Optional[List[str]] = getattr(args, "seeds", None)
+    if seeds:
+        return TachoinClient.from_seeds(seeds)
+    return TachoinClient(num_validators=getattr(args, "validators", 4))
+
+
+def _print_json(payload: Dict[str, Any]) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _fail(message: str) -> None:
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+# ---- Wallet commands --------------------------------------------------
 
 
 def cmd_create_wallet(args: argparse.Namespace) -> None:
-    """Create a new tachoin wallet and display details."""
     wallet = TachoinWallet.generate()
-    print("New Tachoin wallet created:\n")
+    print(f"New {TOKEN_SYMBOL} wallet\n")
     print(f"  Address    : {wallet.address}")
-    print(f"  Public Key : {wallet.public_key_hex}")
+    print(f"  Public key : {wallet.public_key_hex}")
     print(f"  Seed (hex) : {wallet.seed_hex}")
     print()
-    print("WARNING: Save your seed securely. Anyone with the seed can access your funds.")
-    print("Use 'save' option to persist the wallet to disk.")
+    print("Anyone holding the seed can spend this wallet's funds.")
+
+    if args.save:
+        path = wallet.save(args.save, args.passphrase)
+        protection = "sealed with a passphrase" if args.passphrase else "UNENCRYPTED"
+        print(f"Saved to {path} ({protection}).")
 
 
-def cmd_save_wallet(args: argparse.Namespace) -> None:
-    """Save wallet to file."""
-    wallet = TachoinWallet.generate()
-    path = args.path or "wallet.json"
-    passphrase = args.passphrase
-    TachoinWallet.save(path, wallet, passphrase)
-    print(f"Wallet saved to {path}")
-    print(f"  Address: {wallet.address}")
+def cmd_show_wallet(args: argparse.Namespace) -> None:
+    try:
+        wallet = TachoinWallet.load(args.path, args.passphrase)
+    except (OSError, ValueError) as exc:
+        _fail(str(exc))
+    _print_json(wallet.to_dict())
 
 
-def cmd_load_wallet(args: argparse.Namespace) -> TachoinWallet:
-    """Load wallet from file."""
-    path = args.path or "wallet.json"
-    passphrase = args.passphrase
-    return TachoinWallet.load(path, passphrase)
-
-
-def _get_client() -> TachoinClient:
-    return TachoinClient(num_validators=4)
+# ---- Queries ----------------------------------------------------------
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    client = _get_client()
-    status = client.status()
-    print(json.dumps(status, indent=2))
-
-
-def cmd_balance(args: argparse.Namespace) -> None:
-    client = _get_client()
-    result = client.balance(args.address)
-    print(f"Balance: {result['balance']}")
-    print(f"Address: {result['address']}")
+    _print_json(_client(args).status())
 
 
 def cmd_supply(args: argparse.Namespace) -> None:
-    client = _get_client()
-    s = client.supply()
-    print(f"Total supply     : {s['total']}")
-    print(f"Circulating supply: {s['circulating']}")
-    print(f"Burned supply    : {s['burned']}")
+    _print_json(_client(args).supply())
+
+
+def cmd_balance(args: argparse.Namespace) -> None:
+    client = _client(args)
+    _print_json(client.balance(args.address))
+
+
+def cmd_validators(args: argparse.Namespace) -> None:
+    client = _client(args)
+    _print_json(
+        {
+            "count": len(client.validator_addresses()),
+            "addresses": client.validator_addresses(),
+        }
+    )
+
+
+# ---- Transactions -----------------------------------------------------
+
+
+def _sender(args: argparse.Namespace, client: TachoinClient) -> TachoinWallet:
+    """Resolve the sending wallet from ``--from`` or validator 0."""
+    wallets = client.validator_wallets()
+    if args.sender:
+        for wallet in wallets:
+            if wallet.address == args.sender:
+                return wallet
+        _fail("sender is not a validator wallet; use a seed-backed wallet")
+    return wallets[args.sender_index]
+
+
+def _report(result: Dict[str, Any]) -> None:
+    if result["success"]:
+        print(f"ok  tx {result['tx_hash'][:16]}...  balance {result['new_balance']}")
+    else:
+        _fail(result["error"] or "transaction rejected")
 
 
 def cmd_transfer(args: argparse.Namespace) -> None:
-    client = _get_client()
-    # Use validator 0's wallet as sender
-    validators = client.get_validator_addresses()
-    sender_wallet = TachoinWallet.generate()  # In production, this would be loaded from disk
-    # For simulation, we use the validator's wallet
-    from .node import _keypair_to_wallet
-    # We need access to the validators - let's use a different approach
-    node = client.get_node()
-    validators_kp = node._validators
-    sender = _keypair_to_wallet(validators_kp[0])
-
-    result = client.transfer(sender, args.to, args.amount)
-    if result["success"]:
-        print(f"Transfer successful!")
-        print(f"  Tx hash     : {result['tx_hash']}")
-        print(f"  New balance : {result['new_balance']}")
-    else:
-        print(f"Transfer failed: {result['error']}")
-        sys.exit(1)
+    client = _client(args)
+    _report(client.transfer(_sender(args, client), args.to, args.amount))
 
 
 def cmd_mint(args: argparse.Namespace) -> None:
-    client = _get_client()
-    node = client.get_node()
-    from .node import _keypair_to_wallet
-    validators_kp = node._validators
-    sender = _keypair_to_wallet(validators_kp[0])
-
-    result = client.mint(sender, args.amount)
-    if result["success"]:
-        print(f"Mint successful! Tx hash: {result['tx_hash']}")
-    else:
-        print(f"Mint failed: {result['error']}")
-        sys.exit(1)
+    client = _client(args)
+    _report(client.mint(_sender(args, client), args.amount))
 
 
 def cmd_burn(args: argparse.Namespace) -> None:
-    client = _get_client()
-    node = client.get_node()
-    from .node import _keypair_to_wallet
-    validators_kp = node._validators
-    sender = _keypair_to_wallet(validators_kp[0])
-
-    result = client.burn(sender, args.amount)
-    if result["success"]:
-        print(f"Burn successful! Tx hash: {result['tx_hash']}")
-    else:
-        print(f"Burn failed: {result['error']}")
-        sys.exit(1)
+    client = _client(args)
+    _report(client.burn(_sender(args, client), args.amount))
 
 
 def cmd_stake(args: argparse.Namespace) -> None:
-    client = _get_client()
-    node = client.get_node()
-    from .node import _keypair_to_wallet
-    validators_kp = node._validators
-    sender = _keypair_to_wallet(validators_kp[0])
-
-    validator = args.validator or validators_kp[0].address
-    result = client.stake(sender, args.amount, validator)
-    if result["success"]:
-        print(f"Stake successful! Tx hash: {result['tx_hash']}")
-    else:
-        print(f"Stake failed: {result['error']}")
-        sys.exit(1)
+    client = _client(args)
+    _report(client.stake(_sender(args, client), args.amount, args.validator))
 
 
 def cmd_unstake(args: argparse.Namespace) -> None:
-    client = _get_client()
-    node = client.get_node()
-    from .node import _keypair_to_wallet
-    validators_kp = node._validators
-    sender = _keypair_to_wallet(validators_kp[0])
+    client = _client(args)
+    _report(client.unstake(_sender(args, client), args.amount, args.validator))
 
-    validator = args.validator or validators_kp[0].address
-    result = client.unstake(sender, args.amount, validator)
-    if result["success"]:
-        print(f"Unstake successful! Tx hash: {result['tx_hash']}")
-    else:
-        print(f"Unstake failed: {result['error']}")
-        sys.exit(1)
+
+# ---- Simulation -------------------------------------------------------
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    """Run a simulation: produce blocks with transfers."""
-    client = _get_client()
-    node = client.get_node()
+    client = _client(args)
+    node = client.node
 
-    blocks = args.blocks
-    txs_per_block = args.txs_per_block
-
-    print(f"Running Tachoin simulation: {blocks} blocks x {txs_per_block} txs/block")
-    print(f"Network: {node.status()['network']}  Token: {node.status()['token']}")
-    print()
-
-    t_start = time.perf_counter()
-    final_slot = node.produce_blocks(blocks, txs_per_block)
-    t_elapsed = time.perf_counter() - t_start
+    print(
+        f"Simulating {args.blocks} blocks x {args.txs_per_block} transfers "
+        f"on {len(client.validator_addresses())} validators"
+    )
+    started = time.perf_counter()
+    blocks = client.produce_blocks(args.blocks, args.txs_per_block)
+    elapsed = time.perf_counter() - started
 
     status = node.status()
-    print(f"Simulation complete in {t_elapsed:.3f}s")
-    print(f"  Final slot       : {final_slot}")
-    print(f"  Total blocks     : {status['total_blocks']}")
-    print(f"  Finalized slot   : {status['finalized_slot']}")
-    print(f"  Total supply     : {status['total_supply']}")
-    print(f"  Circulating      : {status['circulating_supply']}")
-    print(f"  Burned           : {status['burned_supply']}")
-    print(f"  Txs/sec          : {round(blocks * txs_per_block / t_elapsed, 2) if t_elapsed > 0 else 0}")
-    print(f"  Blocks/sec       : {round(blocks / t_elapsed, 2) if t_elapsed > 0 else 0}")
-    print(f"  Latest block hash: {status['latest_block_hash'][:16]}...")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Tachoin - a cryptocurrency built on the Tachyon blockchain",
-        prog="tachoin",
+    submitted = args.blocks * args.txs_per_block
+    print(f"\nFinished {len(blocks)} blocks in {elapsed:.3f}s")
+    print(f"  final slot        : {status['current_slot']}")
+    print(f"  finalized slot    : {status['finalized_slot']}")
+    print(f"  total blocks      : {status['total_blocks']}")
+    print(f"  total supply      : {status['total_supply']}")
+    print(f"  circulating       : {status['circulating_supply']}")
+    print(f"  uncirculated      : {status['uncirculated_supply']}")
+    print(f"  burned            : {status['burned_supply']}")
+    print(f"  supply invariant  : {status['supply_invariant_ok']}")
+    print(f"  balance invariant : {node.check_balance_invariant()}")
+    print(
+        f"  throughput        : {len(blocks) / elapsed:.1f} blocks/s, "
+        f"{submitted / elapsed:.1f} transfers/s"
     )
-    sub = parser.add_subparsers(dest="command", help="Available commands")
+    print(f"  latest block      : {status['latest_block_hash'][:16]}...")
 
-    # create-wallet
-    sub.add_parser("create-wallet", help="Create a new Tachoin wallet")
 
-    # save-wallet
-    p = sub.add_parser("save-wallet", help="Save a new wallet to file")
-    p.add_argument("--path", default="wallet.json", help="Output file path")
-    p.add_argument("--passphrase", default=None, help="Passphrase for encryption")
+def cmd_invariants(args: argparse.Namespace) -> None:
+    client = _client(args)
+    node = client.node
+    _print_json(
+        {
+            "supply_invariant_ok": node.check_supply_invariant(),
+            "balance_invariant_ok": node.check_balance_invariant(),
+            "balances": node.balances_sum(),
+            "stakes": node.stakes_sum(),
+            "circulating": node.get_circulating_supply(),
+            "total": node.get_total_supply(),
+        }
+    )
 
-    # status
-    sub.add_parser("status", help="Show node status")
 
-    # balance
-    p = sub.add_parser("balance", help="Show balance for an address")
-    p.add_argument("address", type=str, help="Tachoin address")
+# ---- Parser -----------------------------------------------------------
 
-    # supply
-    sub.add_parser("supply", help="Show token supply statistics")
 
-    # transfer
-    p = sub.add_parser("transfer", help="Transfer TACH to an address")
-    p.add_argument("to", type=str, help="Recipient address")
-    p.add_argument("amount", type=str, help="Amount in TACH, e.g. '50' or '50.123456'")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="tachoin",
+        description=f"Tachoin ({TOKEN_SYMBOL}) on the Tachyon blockchain",
+    )
+    parser.add_argument("--version", action="version", version=f"tachoin {__version__}")
 
-    # mint
-    p = sub.add_parser("mint", help="Mint TACH (validator only)")
-    p.add_argument("amount", type=str, help="Amount to mint")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--validators", type=int, default=4, help="number of simulated validators"
+    )
+    common.add_argument(
+        "--seeds", nargs="+", default=None, help="hex validator seeds (reproducible)"
+    )
 
-    # burn
-    p = sub.add_parser("burn", help="Burn TACH")
-    p.add_argument("amount", type=str, help="Amount to burn")
+    sub = parser.add_subparsers(dest="command")
 
-    # stake
-    p = sub.add_parser("stake", help="Stake TACH")
-    p.add_argument("amount", type=str, help="Amount to stake")
-    p.add_argument("validator", type=str, nargs="?", default=None, help="Validator address")
+    p = sub.add_parser("create-wallet", help="generate a wallet")
+    p.add_argument("--save", default=None, metavar="PATH", help="write the wallet here")
+    p.add_argument("--passphrase", default=None, help="encrypt the saved seed")
+    p.set_defaults(func=cmd_create_wallet)
 
-    # unstake
-    p = sub.add_parser("unstake", help="Unstake TACH")
-    p.add_argument("amount", type=str, help="Amount to unstake")
-    p.add_argument("validator", type=str, nargs="?", default=None, help="Validator address")
+    p = sub.add_parser("show-wallet", help="print a wallet file's public data")
+    p.add_argument("path")
+    p.add_argument("--passphrase", default=None)
+    p.set_defaults(func=cmd_show_wallet)
 
-    # run
-    p = sub.add_parser("run", help="Run a block production simulation")
-    p.add_argument("--blocks", type=int, default=10, help="Number of blocks to produce")
-    p.add_argument("--txs-per-block", type=int, default=3, help="Transactions per block")
+    p = sub.add_parser("status", parents=[common], help="node status")
+    p.set_defaults(func=cmd_status)
 
-    args = parser.parse_args()
+    p = sub.add_parser("supply", parents=[common], help="supply breakdown")
+    p.set_defaults(func=cmd_supply)
 
-    if args.command is None:
+    p = sub.add_parser("invariants", parents=[common], help="supply and balance invariants")
+    p.set_defaults(func=cmd_invariants)
+
+    p = sub.add_parser("validators", parents=[common], help="validator addresses")
+    p.set_defaults(func=cmd_validators)
+
+    p = sub.add_parser("balance", parents=[common], help="balance of an address")
+    p.add_argument("address")
+    p.set_defaults(func=cmd_balance)
+
+    fee = argparse.ArgumentParser(add_help=False)
+    fee.add_argument("--from", dest="sender", default=None, help="sender address")
+    fee.add_argument("--sender-index", type=int, default=0, help="validator index to send from")
+
+    p = sub.add_parser("transfer", parents=[common, fee], help="transfer TACH")
+    p.add_argument("to")
+    p.add_argument("amount", help="amount such as 12.5")
+    p.set_defaults(func=cmd_transfer)
+
+    p = sub.add_parser("mint", parents=[common, fee], help="mint TACH (validators only)")
+    p.add_argument("amount")
+    p.set_defaults(func=cmd_mint)
+
+    p = sub.add_parser("burn", parents=[common, fee], help="burn TACH")
+    p.add_argument("amount")
+    p.set_defaults(func=cmd_burn)
+
+    p = sub.add_parser("stake", parents=[common, fee], help="stake TACH")
+    p.add_argument("amount")
+    p.add_argument("validator", nargs="?", default=None)
+    p.set_defaults(func=cmd_stake)
+
+    p = sub.add_parser("unstake", parents=[common, fee], help="unstake TACH")
+    p.add_argument("amount")
+    p.add_argument("validator", nargs="?", default=None)
+    p.set_defaults(func=cmd_unstake)
+
+    p = sub.add_parser("run", parents=[common], help="block production simulation")
+    p.add_argument("--blocks", type=int, default=10)
+    p.add_argument("--txs-per-block", type=int, default=3)
+    p.set_defaults(func=cmd_run)
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
         parser.print_help()
-        return
-
-    commands = {
-        "create-wallet": cmd_create_wallet,
-        "save-wallet": cmd_save_wallet,
-        "status": cmd_status,
-        "balance": cmd_balance,
-        "supply": cmd_supply,
-        "transfer": cmd_transfer,
-        "mint": cmd_mint,
-        "burn": cmd_burn,
-        "stake": cmd_stake,
-        "unstake": cmd_unstake,
-        "run": cmd_run,
-    }
-
-    handler = commands.get(args.command)
-    if handler:
-        handler(args)
-    else:
-        parser.print_help()
+        return 0
+    args.func(args)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

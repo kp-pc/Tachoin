@@ -1,54 +1,83 @@
-"""Tachoin network constants and configuration."""
+"""Tachoin protocol constants and state-key helpers.
 
-# Network identifier
+Supply invariant, enforced by the node and checked in tests::
+
+    circulating + uncirculated + burned == TOTAL_SUPPLY
+
+* ``circulating``   - spendable TACH held in account balances.
+* ``uncirculated``  - reserve the validator set may mint from.
+* ``burned``        - permanently destroyed TACH.
+
+Every key written into the Tachyon sparse Merkle tree is derived here, so
+balance, stake and nonce lookups can never drift from their writers.
+"""
+
+from __future__ import annotations
+
+from ._tachyon import ensure_tachyon
+
+ensure_tachyon()
+
+from tachyon.encoding import digest
+
+# ---- Network identity -------------------------------------------------
 NETWORK_ID = "tachoin-mainnet"
 TESTNET_ID = "tachoin-testnet"
 
-# Token metadata
+# ---- Token metadata ---------------------------------------------------
 TOKEN_NAME = "Tachoin"
 TOKEN_SYMBOL = "TACH"
 TOKEN_DECIMALS = 18
 
-# Supply
-TOTAL_SUPPLY = 100_000_000 * (10 ** TOKEN_DECIMALS)  # 100 million TACH in least units
+# Display precision used by the CLI and ``format_tach``.
+DISPLAY_DECIMALS = 6
+
+# ---- Supply -----------------------------------------------------------
+# 100,000,000 TACH expressed in base units (10**18 per TACH).
+TOTAL_SUPPLY = 100_000_000 * (10 ** TOKEN_DECIMALS)
+
+# Minted into account balances at genesis and distributed to validators.
 GENESIS_REWARD_POOL = 1_000_000 * (10 ** TOKEN_DECIMALS)
 
-# Staking
+# Held back for validator issuance; see ``TachoinNode.mint``.
+UNCIRCULATED_SUPPLY = TOTAL_SUPPLY - GENESIS_REWARD_POOL
+
+# ---- Staking ----------------------------------------------------------
 MIN_STAKE = 100 * (10 ** TOKEN_DECIMALS)
 MAX_STAKE = 10_000_000 * (10 ** TOKEN_DECIMALS)
-STAKE_REWARD_RATE = 0.05  # 5% APY
-UNSTAKE_COOLDOWN_SLOTS = 400  # ~160 s at 400 ms/slot
+STAKE_REWARD_RATE = 0.05
+UNSTAKE_COOLDOWN_SLOTS = 400
 
-# Fees
-TRANSFER_FEE = 1_000  # in least units (0.000001 TACH)
-MINT_FEE = 10_000
+# ---- Fees -------------------------------------------------------------
+TRANSFER_FEE = 1_000
+MINT_FEE = 0
 
-# Slot timing (inherited from Tachyon)
+# ---- Timing (inherited from Tachyon) ----------------------------------
 SLOT_MS = 400
 SLOTS_PER_EPOCH = 400
 
-# Address prefix (matches wallet.py)
+# ---- Addresses --------------------------------------------------------
 ADDR_PREFIX = "tach"
 
-# State keys (domain-separated for Tachyon's SMT)
+# ---- Sparse Merkle tree keys ------------------------------------------
 STATE_KEY_TOTAL_SUPPLY = b"tachoin/total_supply"
 STATE_KEY_CIRCULATING_SUPPLY = b"tachoin/circulating_supply"
+STATE_KEY_UNCIRCULATED_SUPPLY = b"tachoin/uncirculated_supply"
 STATE_KEY_BURNED_SUPPLY = b"tachoin/burned_supply"
+# Retained for readers of the pre-1.0 layout; not written by the node.
+STATE_KEY_LEGACY_BURNED = b"tachoin/burned_supply"
 
 
 def balance_key(address: str) -> bytes:
-    """Return the SMT key for a given tachoin address balance."""
-    from tachyon.encoding import digest
+    """Sparse Merkle tree key holding ``address``'s spendable balance."""
     return digest("tachoin_balance", address.encode("utf-8"))
 
 
 def stake_key(address: str) -> bytes:
-    """Return the SMT key for a given tachoin address stake amount."""
-    from tachyon.encoding import digest
+    """Sparse Merkle tree key holding ``address``'s staked amount."""
     return digest("tachoin_stake", address.encode("utf-8"))
 
 
 def nonce_key(address: str) -> bytes:
-    """Return the SMT key for a given tachoin address transaction nonce."""
-    from tachyon.encoding import digest
+    """Sparse Merkle tree key holding ``address``'s next expected nonce."""
     return digest("tachoin_nonce", address.encode("utf-8"))

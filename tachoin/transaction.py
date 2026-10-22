@@ -1,203 +1,296 @@
-"""Tachoin transaction types: transfer, mint, burn, stake, and unstake.
+"""Signed Tachoin transactions.
 
-All transactions are signed with Ed25519 and carry a domain-separated payload
-that integrates with Tachyon's executor and mempool.
+A transaction names the sender, its per-account ``nonce``, one program and a
+JSON payload.  The nonce is part of the signed message, so a transaction can
+be included at most once: the node rejects a nonce that is not the account's
+next expected value.
 """
 
 from __future__ import annotations
 
 import json
-import struct
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from dataclasses import dataclass, replace
+from typing import Any, Dict, List, Optional, Tuple
 
-# Add Tachyon to path
-import sys, os
-_TACHYON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tachyon-blockchain")
-if _TACHYON_PATH not in sys.path:
-    sys.path.insert(0, _TACHYON_PATH)
+from ._tachyon import ensure_tachyon
 
-from tachyon.crypto import sign, verify
-from tachyon.encoding import canonical_json, digest, u64
+ensure_tachyon()
 
-from .config import TOKEN_DECIMALS, TRANSFER_FEE, MINT_FEE
-from .wallet import TachoinWallet, _tachoin_public_key_from_address, _tachoin_address_from_public_key
+from tachyon.encoding import canonical_json
 
+from .config import TRANSFER_FEE
+from .wallet import TachoinWallet, is_valid_address
 
-# ---------- Instruction payloads ----------
+#: Program identifiers.  Tachyon sees them as ``tachoin_<program>``.
+PROGRAM_TRANSFER = "transfer"
+PROGRAM_MINT = "mint"
+PROGRAM_BURN = "burn"
+PROGRAM_STAKE = "stake"
+PROGRAM_UNSTAKE = "unstake"
 
-def _encode_transfer(to: str, amount: int, fee: int) -> bytes:
-    """Encode a transfer instruction payload."""
-    return canonical_json({"type": "transfer", "to": to, "amount": amount, "fee": fee})
+PROGRAMS = frozenset(
+    {PROGRAM_TRANSFER, PROGRAM_MINT, PROGRAM_BURN, PROGRAM_STAKE, PROGRAM_UNSTAKE}
+)
 
-def _encode_mint(amount: int) -> bytes:
-    """Encode a mint instruction payload."""
-    return canonical_json({"type": "mint", "amount": amount})
-
-def _encode_burn(amount: int) -> bytes:
-    """Encode a burn instruction payload."""
-    return canonical_json({"type": "burn", "amount": amount})
-
-def _encode_stake(amount: int, validator: str) -> bytes:
-    """Encode a stake instruction payload."""
-    return canonical_json({"type": "stake", "amount": amount, "validator": validator})
-
-def _encode_unstake(amount: int, validator: str) -> bytes:
-    """Encode an unstake instruction payload."""
-    return canonical_json({"type": "unstake", "amount": amount, "validator": validator})
+TACHYON_PROGRAM_PREFIX = "tachoin_"
 
 
-# ---------- TachoinTx dataclass ----------
+class TransactionError(ValueError):
+    """Raised when a transaction payload cannot be built or decoded."""
+
+
+def _encode(**fields: Any) -> bytes:
+    """Encode a payload deterministically."""
+    return canonical_json(fields)
+
+
+def _non_negative(value: int, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TransactionError(f"{field} must be an integer")
+    if value < 0:
+        raise TransactionError(f"{field} cannot be negative")
+    return value
+
+
+def _recipient(address: str) -> str:
+    if not is_valid_address(address):
+        raise TransactionError("recipient is not a valid tachoin address")
+    return address
+
+
+def encode_transfer(to: str, amount: int, fee: int = TRANSFER_FEE) -> bytes:
+    return _encode(
+        type=PROGRAM_TRANSFER,
+        to=_recipient(to),
+        amount=_non_negative(amount, "amount"),
+        fee=_non_negative(fee, "fee"),
+    )
+
+
+def encode_mint(amount: int) -> bytes:
+    return _encode(type=PROGRAM_MINT, amount=_non_negative(amount, "amount"))
+
+
+def encode_burn(amount: int) -> bytes:
+    return _encode(type=PROGRAM_BURN, amount=_non_negative(amount, "amount"))
+
+
+def encode_stake(amount: int, validator: str = "") -> bytes:
+    if validator:
+        _recipient(validator)
+    return _encode(
+        type=PROGRAM_STAKE,
+        amount=_non_negative(amount, "amount"),
+        validator=validator,
+    )
+
+
+def encode_unstake(amount: int, validator: str = "") -> bytes:
+    if validator:
+        _recipient(validator)
+    return _encode(
+        type=PROGRAM_UNSTAKE,
+        amount=_non_negative(amount, "amount"),
+        validator=validator,
+    )
+
+
+def decode_payload(program: str, payload: bytes) -> Dict[str, Any]:
+    """Decode and sanity-check a payload for ``program``."""
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransactionError("instruction payload is not valid JSON") from exc
+    if not isinstance(data, dict) or data.get("type") != program:
+        raise TransactionError(
+            f"payload type does not match program {program!r}"
+        )
+    return data
+
 
 @dataclass(frozen=True)
 class TachoinTx:
-    """A signed Tachoin transaction.
+    """An immutable, signable TACH transaction."""
 
-    Wraps a Tachyon-compatible Transaction with tachoin-specific instruction
-    encoding and verification helpers.
-    """
     sender: str
     nonce: int
-    instructions: list  # list of (program_id, payload_bytes) tuples
-    signature: bytes
+    program: str
+    payload: bytes
     slot: int
+    signature: bytes = b""
 
-    # --- Constructors ---
+    # ---- Construction -------------------------------------------------
+
+    def __post_init__(self) -> None:
+        if self.program not in PROGRAMS:
+            raise TransactionError(f"unknown program {self.program!r}")
+        if not is_valid_address(self.sender):
+            raise TransactionError("sender is not a valid tachoin address")
+        _non_negative(self.nonce, "nonce")
+        _non_negative(self.slot, "slot")
 
     @classmethod
-    def build_transfer(cls, wallet: TachoinWallet, to: str, amount: int,
-                      slot: int, fee: int = TRANSFER_FEE) -> "TachoinTx":
-        """Build and sign a TACH transfer transaction."""
-        payload = _encode_transfer(to, amount, fee)
-        tx = cls(
+    def build(
+        cls,
+        wallet: TachoinWallet,
+        program: str,
+        payload: bytes,
+        nonce: int,
+        slot: int,
+    ) -> "TachoinTx":
+        """Sign ``payload`` with ``wallet`` at the given ``nonce``."""
+        unsigned = cls(
             sender=wallet.address,
-            nonce=0,  # nonce is managed by the node per-address
-            instructions=[("tachoin_transfer", payload)],
-            signature=b"",
+            nonce=nonce,
+            program=program,
+            payload=payload,
             slot=slot,
         )
-        sig = wallet.sign(tx.message_bytes())
-        return cls(
-            sender=tx.sender, nonce=tx.nonce,
-            instructions=tx.instructions, signature=sig, slot=slot,
+        return replace(unsigned, signature=wallet.sign(unsigned.message_bytes()))
+
+    @classmethod
+    def build_transfer(
+        cls,
+        wallet: TachoinWallet,
+        to: str,
+        amount: int,
+        nonce: int,
+        slot: int,
+        fee: int = TRANSFER_FEE,
+    ) -> "TachoinTx":
+        return cls.build(
+            wallet, PROGRAM_TRANSFER, encode_transfer(to, amount, fee), nonce, slot
         )
 
     @classmethod
-    def build_mint(cls, wallet: TachoinWallet, amount: int, slot: int) -> "TachoinTx":
-        """Build and sign a mint transaction (requires validator authority)."""
-        payload = _encode_mint(amount)
-        tx = cls(
-            sender=wallet.address, nonce=0,
-            instructions=[("tachoin_mint", payload)],
-            signature=b"", slot=slot,
-        )
-        sig = wallet.sign(tx.message_bytes())
-        return cls(sender=tx.sender, nonce=tx.nonce,
-                   instructions=tx.instructions, signature=sig, slot=slot)
+    def build_mint(
+        cls, wallet: TachoinWallet, amount: int, nonce: int, slot: int
+    ) -> "TachoinTx":
+        return cls.build(wallet, PROGRAM_MINT, encode_mint(amount), nonce, slot)
 
     @classmethod
-    def build_burn(cls, wallet: TachoinWallet, amount: int, slot: int) -> "TachoinTx":
-        """Build and sign a burn transaction."""
-        payload = _encode_burn(amount)
-        tx = cls(
-            sender=wallet.address, nonce=0,
-            instructions=[("tachoin_burn", payload)],
-            signature=b"", slot=slot,
-        )
-        sig = wallet.sign(tx.message_bytes())
-        return cls(sender=tx.sender, nonce=tx.nonce,
-                   instructions=tx.instructions, signature=sig, slot=slot)
+    def build_burn(
+        cls, wallet: TachoinWallet, amount: int, nonce: int, slot: int
+    ) -> "TachoinTx":
+        return cls.build(wallet, PROGRAM_BURN, encode_burn(amount), nonce, slot)
 
     @classmethod
-    def build_stake(cls, wallet: TachoinWallet, amount: int, validator: str, slot: int) -> "TachoinTx":
-        """Build and sign a stake transaction."""
-        payload = _encode_stake(amount, validator)
-        tx = cls(
-            sender=wallet.address, nonce=0,
-            instructions=[("tachoin_stake", payload)],
-            signature=b"", slot=slot,
+    def build_stake(
+        cls,
+        wallet: TachoinWallet,
+        amount: int,
+        validator: str,
+        nonce: int,
+        slot: int,
+    ) -> "TachoinTx":
+        return cls.build(
+            wallet, PROGRAM_STAKE, encode_stake(amount, validator), nonce, slot
         )
-        sig = wallet.sign(tx.message_bytes())
-        return cls(sender=tx.sender, nonce=tx.nonce,
-                   instructions=tx.instructions, signature=sig, slot=slot)
 
     @classmethod
-    def build_unstake(cls, wallet: TachoinWallet, amount: int, validator: str, slot: int) -> "TachoinTx":
-        """Build and sign an unstake transaction."""
-        payload = _encode_unstake(amount, validator)
-        tx = cls(
-            sender=wallet.address, nonce=0,
-            instructions=[("tachoin_unstake", payload)],
-            signature=b"", slot=slot,
+    def build_unstake(
+        cls,
+        wallet: TachoinWallet,
+        amount: int,
+        validator: str,
+        nonce: int,
+        slot: int,
+    ) -> "TachoinTx":
+        return cls.build(
+            wallet, PROGRAM_UNSTAKE, encode_unstake(amount, validator), nonce, slot
         )
-        sig = wallet.sign(tx.message_bytes())
-        return cls(sender=tx.sender, nonce=tx.nonce,
-                   instructions=tx.instructions, signature=sig, slot=slot)
 
-    # --- Serialization ---
+    # ---- Identity -----------------------------------------------------
 
     def message_bytes(self) -> bytes:
-        return canonical_json({
-            "sender": self.sender,
-            "nonce": self.nonce,
-            "instructions": [(pid, p.decode("utf-8", errors="replace")) for pid, p in self.instructions],
-            "slot": self.slot,
-        })
-
-    def to_json(self) -> str:
-        return json.dumps({
-            "sender": self.sender,
-            "nonce": self.nonce,
-            "instructions": [(pid, p.decode("utf-8", errors="replace")) for pid, p in self.instructions],
-            "signature": self.signature.hex(),
-            "slot": self.slot,
-        }, indent=2)
-
-    @staticmethod
-    def from_json(data: str) -> "TachoinTx":
-        d = json.loads(data)
-        return TachoinTx(
-            sender=d["sender"],
-            nonce=d.get("nonce", 0),
-            instructions=[(pid, payload.encode("utf-8")) for pid, payload in d["instructions"]],
-            signature=bytes.fromhex(d["signature"]),
-            slot=d["slot"],
+        """The exact bytes covered by the signature."""
+        return canonical_json(
+            {
+                "sender": self.sender,
+                "nonce": self.nonce,
+                "program": self.program,
+                "payload": self.payload.hex(),
+                "slot": self.slot,
+            }
         )
 
-    # --- Verification ---
+    def tx_hash(self) -> str:
+        """Stable identifier used in receipts and reports."""
+        from tachyon.encoding import digest
+
+        return digest("tachoin_tx", self.message_bytes(), self.signature).hex()
 
     def verify(self) -> bool:
-        """Verify the Ed25519 signature against the sender's tachoin address."""
-        return TachoinWallet.verify(self.sender, self.message_bytes(), self.signature)
+        """Return True when the signature matches the sender address."""
+        if len(self.signature) != 64:
+            return False
+        return TachoinWallet.verify(
+            self.sender, self.message_bytes(), self.signature
+        )
 
-    # --- Tachyon interop ---
+    def data(self) -> Dict[str, Any]:
+        """Decoded payload (raises :class:`TransactionError` if malformed)."""
+        return decode_payload(self.program, self.payload)
+
+    # ---- Serialization -------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sender": self.sender,
+            "nonce": self.nonce,
+            "program": self.program,
+            "payload": self.payload.hex(),
+            "slot": self.slot,
+            "signature": self.signature.hex(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TachoinTx":
+        return cls(
+            sender=data["sender"],
+            nonce=int(data["nonce"]),
+            program=data["program"],
+            payload=bytes.fromhex(data["payload"]),
+            slot=int(data["slot"]),
+            signature=bytes.fromhex(data["signature"]),
+        )
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True)
+
+    @classmethod
+    def from_json(cls, text: str) -> "TachoinTx":
+        return cls.from_dict(json.loads(text))
+
+    # ---- Tachyon interoperability --------------------------------------
 
     def to_tachyon_transaction(self):
-        """Convert to a Tachyon-compatible Transaction for the mempool/executor."""
+        """Project onto a Tachyon ``Transaction`` for the ledger/mempool."""
         from tachyon.chain import Transaction
+
         return Transaction(
             sender=self.sender,
             nonce=self.nonce,
-            instructions=list(self.instructions),
+            instructions=[
+                (TACHYON_PROGRAM_PREFIX + self.program, self.payload)
+            ],
             signature=self.signature,
             slot=self.slot,
         )
 
-    @staticmethod
-    def from_tachyon_transaction(tx) -> "TachoinTx":
-        """Wrap a Tachyon Transaction as a TachoinTx."""
-        return TachoinTx(
+    @classmethod
+    def from_tachyon_transaction(cls, tx) -> "TachoinTx":
+        """Wrap a Tachyon ``Transaction`` produced by this package."""
+        if len(tx.instructions) != 1:
+            raise TransactionError("tachoin transactions carry exactly one instruction")
+        program_id, payload = tx.instructions[0]
+        if not program_id.startswith(TACHYON_PROGRAM_PREFIX):
+            raise TransactionError(f"not a tachoin program: {program_id!r}")
+        return cls(
             sender=tx.sender,
             nonce=tx.nonce,
-            instructions=list(tx.instructions),
-            signature=tx.signature,
+            program=program_id[len(TACHYON_PROGRAM_PREFIX) :],
+            payload=payload,
             slot=tx.slot,
+            signature=tx.signature,
         )
-
-
-def decode_instruction(payload: bytes) -> dict:
-    """Decode a tachoin instruction payload back to a dict."""
-    try:
-        return json.loads(payload.decode("utf-8"))
-    except Exception:
-        return {"raw": payload.hex()}

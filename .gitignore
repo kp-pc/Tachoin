@@ -1,3 +1,29 @@
-*__pycache__*
-.a0proj
-tachyon-blockchain
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+sdist/
+wheels/
+
+# Virtual environments
+venv/
+.venv/
+
+# Local project metadata and secrets
+.a0proj/
+
+# External dependency checkout (cloned separately; see README)
+tachyon-blockchain/
+
+# Local wallets and scratch files
+wallet.json
+*.wallet.json
+*.log

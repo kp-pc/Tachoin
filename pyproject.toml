@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tachoin"
+version = "1.0.0"
+description = "Tachoin (TACH): a cryptocurrency with Ed25519 wallets, nonce-safe transactions and staking, built on the Tachyon blockchain"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Tachoin contributors" }]
+keywords = ["cryptocurrency", "blockchain", "tachyon", "ed25519", "token"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# Tachyon is resolved at runtime from a checkout or TACHYON_PATH; it is not on
+# PyPI, so it cannot be a normal install requirement.
+dev = []
+
+[project.scripts]
+tachoin = "tachoin.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/kp-pc/Techoin"
+Source = "https://github.com/kp-pc/Techoin"
+Issues = "https://github.com/kp-pc/Techoin/issues"
+Changelog = "https://github.com/kp-pc/Techoin/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+packages = ["tachoin"]
+
+[tool.setuptools.package-data]
+tachoin = ["py.typed"]
