@@ -65,4 +65,4 @@ First official package release.
 - Rejected transactions restore the prior state and do not consume a nonce.
 - Tampered signatures are rejected before any state change.
 
-[1.0.0]: https://github.com/kp-pc/Techoin/releases/tag/v1.0.0
+[1.0.0]: https://github.com/kp-pc/Tachoin/releases/tag/v1.0.0

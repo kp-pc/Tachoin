@@ -47,8 +47,8 @@ The second one catches a subtle bug: crediting a genesis allocation to *both* th
 Tachyon is not published on PyPI, so it is resolved at runtime rather than declared as a dependency.
 
 ```bash
-git clone https://github.com/kp-pc/Techoin.git
-cd Techoin
+git clone https://github.com/kp-pc/Tachoin.git
+cd Tachoin
 git clone https://github.com/kp-pc/Tachyon-blockchain.git tachyon-blockchain
 
 pip install -e .          # provides the `tachoin` command
