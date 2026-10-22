@@ -18,7 +18,7 @@ ensure_tachyon()
 
 from tachyon.encoding import canonical_json
 
-from .config import TRANSFER_FEE
+from .config import MAX_TRANSFER_AMOUNT, TRANSFER_FEE
 from .wallet import TachoinWallet, is_valid_address
 
 #: Program identifiers.  Tachyon sees them as ``tachoin_<program>``.
@@ -58,17 +58,27 @@ def _recipient(address: str) -> str:
     return address
 
 
+def _bounded(value: int, field: str) -> int:
+    """Ensure ``value`` is non-negative and within the protocol limit."""
+    _non_negative(value, field)
+    if value > MAX_TRANSFER_AMOUNT:
+        raise TransactionError(
+            f"{field} {value} exceeds maximum {MAX_TRANSFER_AMOUNT}"
+        )
+    return value
+
+
 def encode_transfer(to: str, amount: int, fee: int = TRANSFER_FEE) -> bytes:
     return _encode(
         type=PROGRAM_TRANSFER,
         to=_recipient(to),
-        amount=_non_negative(amount, "amount"),
+        amount=_bounded(amount, "amount"),
         fee=_non_negative(fee, "fee"),
     )
 
 
 def encode_mint(amount: int) -> bytes:
-    return _encode(type=PROGRAM_MINT, amount=_non_negative(amount, "amount"))
+    return _encode(type=PROGRAM_MINT, amount=_bounded(amount, "amount"))
 
 
 def encode_burn(amount: int) -> bytes:

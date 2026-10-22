@@ -52,6 +52,13 @@ UNSTAKE_COOLDOWN_SLOTS = 400
 TRANSFER_FEE = 1_000
 MINT_FEE = 0
 
+# ---- Amount bounds ---------------------------------------------------
+#: Maximum value that may be transferred or minted in a single transaction.
+#: Prevents integer overflow in the underlying Tachyon transport which may
+#: not handle extremely large integers gracefully.  Capped to the total
+#: supply so a single transfer cannot exceed the entire token economy.
+MAX_TRANSFER_AMOUNT = TOTAL_SUPPLY // 2
+
 # ---- Security limits --------------------------------------------------
 #: Maximum number of transactions that may sit in the pending mempool before
 #: a new submission is rejected.  Prevents unbounded memory growth from

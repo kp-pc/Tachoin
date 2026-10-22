@@ -73,8 +73,28 @@ class TokenState:
         self._tree.set(key, value)
 
     def update(self, pairs: Dict[bytes, bytes]) -> None:
+        """Apply ``pairs`` atomically: on success the state reflects all
+        writes; on failure the original state is untouched.
+        """
+        # Build the new state entirely from copies so any exception
+        # (validation, SMT error) cannot corrupt ``self``.
+        new_values = dict(self._values)
+        new_tree = SparseMerkleTree()
+        for k, v in new_values.items():
+            new_tree.set(k, v)
         for key, value in pairs.items():
-            self.set(key, value)
+            if not isinstance(key, bytes):
+                raise TypeError("state keys must be bytes")
+            if not isinstance(value, bytes):
+                raise TypeError("state values must be bytes")
+            if value:
+                new_values[key] = value
+            else:
+                new_values.pop(key, None)
+            new_tree.set(key, value)
+        # Atomic swap — no intermediate state visible.
+        self._values = new_values
+        self._tree = new_tree
 
     # ---- Snapshots ----------------------------------------------------
 
