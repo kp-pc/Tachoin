@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ Tachoin
+# ⚡ Tachoin-Coin
 
 **A cryptocurrency you can actually reason about.**
 
