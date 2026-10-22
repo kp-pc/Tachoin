@@ -22,7 +22,7 @@ from .config import (
 from .transaction import TachoinTx, TransactionError
 from .wallet import TachoinWallet, address_from_seed, is_valid_address
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 __all__ = [
     "GENESIS_REWARD_POOL",

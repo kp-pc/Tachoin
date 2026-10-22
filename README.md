@@ -6,8 +6,8 @@
 
 Ed25519 wallets · nonce-safe signed transactions · staking · a 100,000,000 TACH supply that provably balances
 
-[![Release](https://img.shields.io/badge/release-v1.0.1-00d4aa?style=for-the-badge)](https://github.com/kp-pc/Tachoin/releases/tag/v1.0.1)
-[![Tests](https://img.shields.io/badge/tests-66%20passing-2ea44f?style=for-the-badge)](tests/test_tachoin.py)
+[![Release](https://img.shields.io/badge/release-v1.0.2-00d4aa?style=for-the-badge)](https://github.com/kp-pc/Tachoin/releases/tag/v1.0.2)
+[![Tests](https://img.shields.io/badge/tests-70%20passing-2ea44f?style=for-the-badge)](tests/test_tachoin.py)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=for-the-badge&logo=python&logoColor=white)](pyproject.toml)
 [![Dependencies](https://img.shields.io/badge/runtime%20deps-none-brightgreen?style=for-the-badge)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
@@ -20,7 +20,7 @@ Built on the [Tachyon](https://github.com/kp-pc/Tachyon-blockchain) blockchain
 
 ---
 
-> **Status: 1.0.1** — reference implementation for development, testing and education.
+> **Status: 1.0.2** — reference implementation for development, testing and education.
 > Not audited. Do not custody real value with it.
 
 ---
@@ -206,7 +206,7 @@ tachoin/
 ├── node.py          state machine, invariants, block production
 ├── client.py        amount-aware convenience API
 └── __main__.py      CLI
-tests/               66-test stdlib unittest suite
+tests/               70-test stdlib unittest suite
 ```
 
 **State** lives in `TokenState`: the authoritative key/value map, mirrored into a Tachyon `SparseMerkleTree` so block headers commit to a real Merkle root. Tachyon is an unreleased external dependency and stays **unmodified** — no vendored patches.
@@ -221,7 +221,7 @@ tests/               66-test stdlib unittest suite
 python -m unittest discover -s tests -t . -v
 ```
 
-**66 tests, standard library only** — no pytest required. Coverage: address/signature identity, wallet sealing and tamper detection, amount parsing, genesis allocation, nonce replay and out-of-order rejection, failed-transaction rollback, mint/burn/stake/unstake, supply and balance conservation, block inclusion, state-root changes, and the client API for every program.
+**70 tests, standard library only** — no pytest required. Coverage: address/signature identity, wallet sealing and tamper detection, amount parsing, genesis allocation, nonce replay and out-of-order rejection, failed-transaction rollback, mint/burn/stake/unstake, supply and balance conservation, block inclusion, state-root changes, and the client API for every program.
 
 ---
 

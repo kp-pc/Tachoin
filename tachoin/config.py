@@ -60,12 +60,25 @@ SLOTS_PER_EPOCH = 400
 ADDR_PREFIX = "tach"
 
 # ---- Sparse Merkle tree keys ------------------------------------------
-STATE_KEY_TOTAL_SUPPLY = b"tachoin/total_supply"
-STATE_KEY_CIRCULATING_SUPPLY = b"tachoin/circulating_supply"
-STATE_KEY_UNCIRCULATED_SUPPLY = b"tachoin/uncirculated_supply"
-STATE_KEY_BURNED_SUPPLY = b"tachoin/burned_supply"
+#
+# Tachyon's SMT is a 256-bit tree: ``_key_to_path`` walks every bit of the key
+# and ``set`` climbs exactly 256 levels. A key of any other length therefore
+# produces a commitment whose path length does not match the tree, and current
+# Tachyon rejects it outright with ``SMT key must be exactly 32 bytes``.
+#
+# Every key is derived through :func:`tachyon.encoding.digest`, never written as
+# a literal, so its length is guaranteed by construction.
+def _state_key(name: str) -> bytes:
+    """Derive a 32-byte sparse Merkle tree key for a protocol-level counter."""
+    return digest("tachoin_state", name.encode("utf-8"))
+
+
+STATE_KEY_TOTAL_SUPPLY = _state_key("total_supply")
+STATE_KEY_CIRCULATING_SUPPLY = _state_key("circulating_supply")
+STATE_KEY_UNCIRCULATED_SUPPLY = _state_key("uncirculated_supply")
+STATE_KEY_BURNED_SUPPLY = _state_key("burned_supply")
 # Retained for readers of the pre-1.0 layout; not written by the node.
-STATE_KEY_LEGACY_BURNED = b"tachoin/burned_supply"
+STATE_KEY_LEGACY_BURNED = STATE_KEY_BURNED_SUPPLY
 
 
 def balance_key(address: str) -> bytes:

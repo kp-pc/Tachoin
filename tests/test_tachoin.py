@@ -576,6 +576,60 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(self.client.node.check_balance_invariant())
 
 
+class StateKeyTests(unittest.TestCase):
+    """Every sparse Merkle tree key must be a 32-byte digest.
+
+    Tachyon's SMT is a 256-bit tree: ``set`` walks exactly 32 bytes and current
+    releases reject any other length with ``SMT key must be exactly 32 bytes``.
+    Tachoin 1.0.1 shipped 20-byte literal protocol keys, so importing the node
+    raised on any up-to-date Tachyon checkout while passing against a stale one.
+    These tests pin the invariant so a literal cannot be reintroduced.
+    """
+
+    ADDRESS = TachoinWallet(seed=bytes([7]) * 32).address
+
+    def test_protocol_state_keys_are_32_bytes(self):
+        from tachoin import config
+
+        for name in (
+            "STATE_KEY_TOTAL_SUPPLY",
+            "STATE_KEY_CIRCULATING_SUPPLY",
+            "STATE_KEY_UNCIRCULATED_SUPPLY",
+            "STATE_KEY_BURNED_SUPPLY",
+        ):
+            key = getattr(config, name)
+            self.assertIsInstance(key, bytes, name)
+            self.assertEqual(len(key), 32, f"{name} must be 32 bytes")
+
+    def test_account_keys_are_32_bytes(self):
+        from tachoin.config import balance_key, nonce_key, stake_key
+
+        for builder in (balance_key, stake_key, nonce_key):
+            key = builder(self.ADDRESS)
+            self.assertIsInstance(key, bytes)
+            self.assertEqual(len(key), 32, builder.__name__)
+
+    def test_key_families_do_not_collide(self):
+        from tachoin import config
+        from tachoin.config import balance_key, nonce_key, stake_key
+
+        keys = [
+            config.STATE_KEY_TOTAL_SUPPLY,
+            config.STATE_KEY_CIRCULATING_SUPPLY,
+            config.STATE_KEY_UNCIRCULATED_SUPPLY,
+            config.STATE_KEY_BURNED_SUPPLY,
+            balance_key(self.ADDRESS),
+            stake_key(self.ADDRESS),
+            nonce_key(self.ADDRESS),
+        ]
+        self.assertEqual(len(set(keys)), len(keys), "state keys must be unique")
+
+    def test_node_initialises_and_conserves_supply(self):
+        node, _ = make_node(2)
+        self.assertTrue(node.check_supply_invariant())
+        self.assertTrue(node.check_balance_invariant())
+
+
 class PackageTests(unittest.TestCase):
     def test_version_is_release_shaped(self):
         parts = tachoin.__version__.split(".")

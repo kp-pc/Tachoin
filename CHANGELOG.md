@@ -3,6 +3,40 @@
 All notable changes to Tachoin are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-10-22
+
+Compatibility release. **1.0.1 could not start on an up-to-date Tachyon checkout.**
+
+### Fixed
+
+- **Protocol state keys were 20-byte literals in a 256-bit tree.**
+  `STATE_KEY_TOTAL_SUPPLY` and friends were written as
+  `b"tachoin/total_supply"`, so constructing a node raised
+  `ValueError: SMT key must be exactly 32 bytes, got 20` against current Tachyon.
+  Every protocol key is now derived through `tachyon.encoding.digest`, which
+  guarantees 32 bytes by construction and keeps each key domain-separated.
+
+  This is a **consensus-visible change**: the derived keys produce different
+  state roots than the literals did. No block history is affected, because
+  1.0.0 and 1.0.1 never produced valid blocks on current Tachyon.
+
+### Why it shipped
+
+The local `tachyon-blockchain` checkout was five commits behind `origin/main`.
+Upstream added `SparseMerkleTree._validate_key` in that window, and every test
+run - including the "clean clone" checks used to sign off 1.0.0 and 1.0.1 -
+cloned the dependency the same stale way, so it always resolved to the old tree.
+The regression was invisible until the dependency was refreshed.
+
+### Added
+
+- Four `StateKeyTests` that pin the invariant directly: every protocol key and
+  every account key must be exactly 32 bytes, no key family may collide, and a
+  freshly built node must satisfy both supply invariants. A literal key of the
+  wrong length now fails loudly in the suite rather than only on a modern
+  dependency.
+- The suite is now 70 tests.
+
 ## [1.0.1] - 2026-10-22
 
 Documentation release that also fixes a broken public API entry point.
@@ -97,3 +131,4 @@ First official package release.
 
 [1.0.0]: https://github.com/kp-pc/Tachoin/releases/tag/v1.0.0
 [1.0.1]: https://github.com/kp-pc/Tachoin/releases/tag/v1.0.1
+[1.0.2]: https://github.com/kp-pc/Tachoin/releases/tag/v1.0.2
