@@ -525,14 +525,56 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.node.get_stake(self.sender.address), 100 * ONE_TACH)
 
     def test_stake_to_explicit_validator(self):
-        baseline = self.client.node.ledger.get_stake(self.other.address)
+        # The SMT is the source of truth for token stake; the ledger is
+        # synchronised from it at block-production time.  Produce a block
+        # first so the ledger reflects the new delegation before we assert.
         result = self.client.stake(self.sender, "50", self.other.address)
         self.assertTrue(result["success"], result["error"])
-        # The staker keeps the token bucket; the validator gets the delegation.
+        # Staker's token bucket, verified immediately via the SMT.
+        self.assertEqual(self.client.node.get_stake(self.sender.address), 50 * ONE_TACH)
+        # Ledger stake for the validator, verified after block production.
+        self.client.node.produce_block()
+        self.assertEqual(
+            self.client.node.ledger.get_stake(self.other.address),
+            250000 * ONE_TACH + 50 * ONE_TACH,
+        )
+
+    def test_unstake_to_explicit_validator(self):
+        result = self.client.stake(self.sender, "80", self.other.address)
+        self.assertTrue(result["success"], result["error"])
+        self.client.node.produce_block()
+        self.assertEqual(
+            self.client.node.ledger.get_stake(self.other.address),
+            250000 * ONE_TACH + 80 * ONE_TACH,
+        )
+        unstake_result = self.client.unstake(self.sender, "30", self.other.address)
+        self.assertTrue(unstake_result["success"], unstake_result["error"])
+        self.client.node.produce_block()
         self.assertEqual(self.client.node.get_stake(self.sender.address), 50 * ONE_TACH)
         self.assertEqual(
             self.client.node.ledger.get_stake(self.other.address),
-            baseline + 50 * ONE_TACH,
+            250000 * ONE_TACH + 50 * ONE_TACH,
+        )
+
+    def test_ledger_syncs_from_smt_at_block_production(self):
+        """Regression: _apply_stake/_apply_unstake no longer write the ledger
+        directly, so the two stores must match only after produce_block()."""
+        self.client.stake(self.sender, "40", self.other.address)
+        # Before block production the ledger still shows the genesis stake.
+        self.assertEqual(
+            self.client.node.ledger.get_stake(self.other.address),
+            250000 * ONE_TACH,
+        )
+        # After block production the ledger reflects the SMT value.
+        self.client.node.produce_block()
+        self.assertEqual(
+            self.client.node.ledger.get_stake(self.other.address),
+            250000 * ONE_TACH + 40 * ONE_TACH,
+        )
+        # And the staker's SMT bucket matches what the ledger claims.
+        self.assertEqual(
+            self.client.node.get_stake(self.sender.address),
+            40 * ONE_TACH,
         )
 
     def test_unstake_returns_balance(self):
@@ -542,18 +584,19 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.client.node.get_stake(self.sender.address), 60 * ONE_TACH)
 
     def test_unstake_to_explicit_validator(self):
-        baseline = self.client.node.ledger.get_stake(self.other.address)
         self.assertTrue(self.client.stake(self.sender, "80", self.other.address)["success"])
+        self.client.node.produce_block()
         self.assertEqual(
             self.client.node.ledger.get_stake(self.other.address),
-            baseline + 80 * ONE_TACH,
+            250000 * ONE_TACH + 80 * ONE_TACH,
         )
         result = self.client.unstake(self.sender, "30", self.other.address)
         self.assertTrue(result["success"], result["error"])
+        self.client.node.produce_block()
         self.assertEqual(self.client.node.get_stake(self.sender.address), 50 * ONE_TACH)
         self.assertEqual(
             self.client.node.ledger.get_stake(self.other.address),
-            baseline + 50 * ONE_TACH,
+            250000 * ONE_TACH + 50 * ONE_TACH,
         )
 
     def test_client_nonces_advance_across_programs(self):
@@ -628,6 +671,135 @@ class StateKeyTests(unittest.TestCase):
         node, _ = make_node(2)
         self.assertTrue(node.check_supply_invariant())
         self.assertTrue(node.check_balance_invariant())
+
+
+class SecurityTests(unittest.TestCase):
+    """Regression tests for the two security fixes from the vulnerability report."""
+
+    def setUp(self):
+        self.node, self.wallets = make_node(4)
+        self.sender = self.wallets[0]
+        self.recipient = self.wallets[1]
+
+    def test_fee_bypass_rejected(self):
+        """Vulnerability #1: a transfer crafted with fee=0 must be rejected.
+
+        Before the fix, _apply_transfer read the fee from the payload with
+        `data.get("fee", TRANSFER_FEE)` so an attacker could set fee=0 and
+        skip the validator payout entirely.
+        """
+        from tachoin.config import TRANSFER_FEE
+        from tachoin.transaction import TachoinTx, encode_transfer
+
+        # Craft a transfer with fee=0 — must fail at submission.
+        payload = encode_transfer(self.recipient.address, 10**18, fee=0)
+        tx = TachoinTx.build(
+            self.sender,
+            "transfer",
+            payload,
+            self.node.get_nonce(self.sender.address),
+            self.node.get_current_slot() + 1,
+        )
+        result = self.node.submit_transaction(tx)
+        self.assertFalse(result.success)
+        self.assertIn("fee must be at least", result.error)
+        # Balance must be unchanged.
+        self.assertEqual(
+            self.node.get_balance(self.sender.address),
+            250000 * ONE_TACH,
+        )
+
+    def test_fee_below_minimum_rejected(self):
+        """A transfer with fee < TRANSFER_FEE must also be rejected."""
+        from tachoin.transaction import TachoinTx, encode_transfer
+
+        payload = encode_transfer(self.recipient.address, 10**18, fee=1)
+        tx = TachoinTx.build(
+            self.sender,
+            "transfer",
+            payload,
+            self.node.get_nonce(self.sender.address),
+            self.node.get_current_slot() + 1,
+        )
+        result = self.node.submit_transaction(tx)
+        self.assertFalse(result.success)
+        self.assertIn("fee must be at least", result.error)
+
+    def test_normal_transfer_still_succeeds(self):
+        """Sanity check: a transfer with the default fee still works."""
+        result = self.node.submit_transaction(
+            TachoinTx.build_transfer(
+                self.sender,
+                self.recipient.address,
+                10**18,
+                self.node.get_nonce(self.sender.address),
+                self.node.get_current_slot() + 1,
+            )
+        )
+        self.assertTrue(result.success, result.error)
+
+    def test_slot_freshness_rejects_far_future_slot(self):
+        """Vulnerability #2: a transaction signed far ahead of the current slot
+        must be rejected, preventing replay of stale pre-signed transactions."""
+        from tachoin.config import SLOT_FRESHNESS_SLOTS
+        from tachoin.transaction import TachoinTx
+
+        far_slot = self.node.get_current_slot() + SLOT_FRESHNESS_SLOTS + 10
+        tx = TachoinTx.build_transfer(
+            self.sender,
+            self.recipient.address,
+            10**18,
+            self.node.get_nonce(self.sender.address),
+            far_slot,
+        )
+        result = self.node.submit_transaction(tx)
+        self.assertFalse(result.success)
+        self.assertIn("slot", result.error.lower())
+
+    def test_slot_freshness_allows_within_window(self):
+        """A transaction signed within the freshness window must be accepted."""
+        from tachoin.config import SLOT_FRESHNESS_SLOTS
+        from tachoin.transaction import TachoinTx
+
+        ok_slot = self.node.get_current_slot() + SLOT_FRESHNESS_SLOTS
+        tx = TachoinTx.build_transfer(
+            self.sender,
+            self.recipient.address,
+            10**18,
+            self.node.get_nonce(self.sender.address),
+            ok_slot,
+        )
+        result = self.node.submit_transaction(tx)
+        self.assertTrue(result.success, result.error)
+
+    def test_mempool_bound_rejects_when_full(self):
+        """Vulnerability #5: when the mempool is full, new submissions must
+        be rejected with a clear error rather than growing memory unbounded.
+
+        The mempool guard fires after the slot-freshness check but before
+        the nonce check, so we fill ``_pending`` directly and verify the
+        rejection path.
+        """
+        from tachoin.config import MAX_PENDING_TXS
+        from tachoin.transaction import TachoinTx
+
+        node, wallets = make_node(4)
+        sender, recipient = wallets[0], wallets[1]
+
+        # Simulate a full mempool without submitting MAX_PENDING_TXS real txs.
+        node._pending = [None] * MAX_PENDING_TXS
+
+        tx = TachoinTx.build_transfer(
+            sender,
+            recipient.address,
+            10 ** 18,
+            node.get_nonce(sender.address),
+            node.get_current_slot() + 1,
+        )
+        result = node.submit_transaction(tx)
+        self.assertFalse(result.success)
+        self.assertIn("mempool is full", result.error)
+
 
 
 class PackageTests(unittest.TestCase):

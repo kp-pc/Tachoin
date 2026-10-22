@@ -52,6 +52,18 @@ UNSTAKE_COOLDOWN_SLOTS = 400
 TRANSFER_FEE = 1_000
 MINT_FEE = 0
 
+# ---- Security limits --------------------------------------------------
+#: Maximum number of transactions that may sit in the pending mempool before
+#: a new submission is rejected.  Prevents unbounded memory growth from
+#: mempool flooding attacks.
+MAX_PENDING_TXS = 10_000
+
+#: How far ahead of the current slot a transaction may be signed before it is
+#: rejected as stale.  A transaction signed for a slot more than this many
+#: slots in the past is not accepted, preventing replay of old, low-fee
+#: transactions that skipped the mandatory fee.
+SLOT_FRESHNESS_SLOTS = 2
+
 # ---- Timing (inherited from Tachyon) ----------------------------------
 SLOT_MS = 400
 SLOTS_PER_EPOCH = 400
@@ -87,8 +99,19 @@ def balance_key(address: str) -> bytes:
 
 
 def stake_key(address: str) -> bytes:
-    """Sparse Merkle tree key holding ``address``'s staked amount."""
+    """Sparse Merkle tree key holding the total TACH ``address`` has staked."""
     return digest("tachoin_stake", address.encode("utf-8"))
+
+
+def validator_stake_key(address: str) -> bytes:
+    """Sparse Merkle tree key holding the total TACH delegated to ``address``.
+
+    This is the election-weight source: when a staker delegates to a validator,
+    the validator's stake key is incremented, not the staker's.  The Tachyon
+    ledger is synchronised from this key at block-production time, so the SMT
+    remains the single source of truth for election weights.
+    """
+    return digest("tachoin_validator_stake", address.encode("utf-8"))
 
 
 def nonce_key(address: str) -> bytes:

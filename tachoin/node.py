@@ -38,6 +38,8 @@ from tachyon.encoding import digest
 
 from .config import (
     DISPLAY_DECIMALS,
+    MAX_PENDING_TXS,
+    SLOT_FRESHNESS_SLOTS,
     STATE_KEY_BURNED_SUPPLY,
     STATE_KEY_CIRCULATING_SUPPLY,
     STATE_KEY_TOTAL_SUPPLY,
@@ -47,6 +49,7 @@ from .config import (
     balance_key,
     nonce_key,
     stake_key,
+    validator_stake_key,
 )
 from .genesis import (
     apply_genesis_state,
@@ -157,7 +160,13 @@ class TachoinNode:
         self._genesis = self._build_genesis()
         self.ledger.add_block(self._genesis)
 
+        # Write genesis stakes into both the SMT (validator_stake_key) and the
+        # ledger so that the first produce_block sync from the SMT does not
+        # overwrite the election weight with zero.
         for address, stake in self._allocations:
+            self.state.set(
+                validator_stake_key(address), int_to_bytes(stake)
+            )
             self.ledger.set_stake(address, stake)
         for address in self._validator_addrs:
             self.ledger.add_vote(
@@ -184,7 +193,12 @@ class TachoinNode:
         return bytes_to_int(self.state.get(balance_key(address)))
 
     def get_stake(self, address: str) -> int:
+        """Return the total TACH ``address`` has personally staked."""
         return bytes_to_int(self.state.get(stake_key(address)))
+
+    def get_validator_stake(self, address: str) -> int:
+        """Return the total TACH delegated to ``address`` (election weight)."""
+        return bytes_to_int(self.state.get(validator_stake_key(address)))
 
     def get_nonce(self, address: str) -> int:
         """Next nonce expected from ``address``."""
@@ -304,6 +318,22 @@ class TachoinNode:
         if not tx.verify():
             return self._result(tx, False, "invalid signature")
 
+        # Slot freshness: reject transactions signed more than
+        # SLOT_FRESHNESS_SLOTS ahead of the current slot.  This prevents
+        # replay of stale, pre-signed transactions that carry old fee values.
+        if tx.slot > self._current_slot + SLOT_FRESHNESS_SLOTS:
+            return self._result(
+                tx,
+                False,
+                f"slot {tx.slot} exceeds freshness window "
+                f"(current={self._current_slot}, max={self._current_slot + SLOT_FRESHNESS_SLOTS})",
+            )
+
+        # Mempool bound: reject new work when the pending queue is full so a
+        # flood cannot exhaust node memory before the next block drains it.
+        if len(self._pending) >= MAX_PENDING_TXS:
+            return self._result(tx, False, "mempool is full")
+
         expected = self.get_nonce(tx.sender)
         if tx.nonce != expected:
             return self._result(
@@ -352,6 +382,11 @@ class TachoinNode:
             return "transfer amount must be positive"
         if tx.sender == recipient:
             return "cannot transfer to self"
+        # Enforce the mandatory fee: any transfer with fee < TRANSFER_FEE is
+        # rejected.  This plugs the fee-bypass vector where a transaction
+        # crafted with fee=0 would skip the validator payout entirely.
+        if fee < TRANSFER_FEE:
+            return f"fee must be at least {TRANSFER_FEE}, got {fee}"
         if self.get_balance(tx.sender) < amount + fee:
             return "insufficient balance"
 
@@ -361,8 +396,7 @@ class TachoinNode:
         leader = self.election.get_leader(tx.slot)
         self._credit(tx.sender, -(amount + fee))
         self._credit(recipient, amount)
-        if fee:
-            self._credit(leader, fee)
+        self._credit(leader, fee)
         return None
 
     def _apply_mint(self, tx: TachoinTx) -> Optional[str]:
@@ -403,6 +437,13 @@ class TachoinNode:
         return None
 
     def _apply_stake(self, tx: TachoinTx) -> Optional[str]:
+        """Apply a stake transaction.
+
+        The SMT is the single source of truth for token stake.  The Tachyon
+        ledger is synced from the SMT at block-production time (see
+        :meth:`produce_block`), so a rejected block cannot leave the two
+        stores out of step.
+        """
         data = tx.data()
         amount = int(data["amount"])
         validator = data.get("validator") or tx.sender
@@ -417,10 +458,22 @@ class TachoinNode:
         self.state.set(
             stake_key(tx.sender), int_to_bytes(self.get_stake(tx.sender) + amount)
         )
-        self.ledger.set_stake(validator, self.ledger.get_stake(validator) + amount)
+        # Track the delegation in the validator's election-weight bucket so the
+        # SMT remains the source of truth for both personal stake and election
+        # weight, preventing ledger/SMT drift.
+        self.state.set(
+            validator_stake_key(validator),
+            int_to_bytes(self.get_validator_stake(validator) + amount),
+        )
+        # Ledger sync deferred to produce_block to keep SMT and ledger in lock-step.
         return None
 
     def _apply_unstake(self, tx: TachoinTx) -> Optional[str]:
+        """Apply an unstake transaction.
+
+        Same principle as :meth:`_apply_stake`: the SMT is authoritative,
+        and the ledger is reconciled at block-production time.
+        """
         data = tx.data()
         amount = int(data["amount"])
         validator = data.get("validator") or tx.sender
@@ -432,9 +485,15 @@ class TachoinNode:
 
         self._credit(tx.sender, amount)
         self.state.set(stake_key(tx.sender), int_to_bytes(staked - amount))
-        if self.is_validator(validator):
-            current = self.ledger.get_stake(validator)
-            self.ledger.set_stake(validator, max(0, current - amount))
+        # Decrement the validator's election-weight bucket alongside the personal
+        # stake bucket so both SMT views stay in sync.
+        self.state.set(
+            validator_stake_key(validator),
+            int_to_bytes(
+                max(0, self.get_validator_stake(validator) - amount)
+            ),
+        )
+        # Ledger sync deferred to produce_block to keep SMT and ledger in lock-step.
         return None
 
     # ---- Block production ---------------------------------------------
@@ -463,6 +522,13 @@ class TachoinNode:
             leader=self.election.get_leader(slot),
             timestamp=self._genesis_timestamp + slot * SLOT_MS,
         )
+        # Sync validator stakes from the SMT into the ledger so that the
+        # election and finalisation logic sees the same stake weights the
+        # token state records.  Deferring this to block-production time means
+        # a rejected block cannot leave the two stores out of step.
+        for validator in self._validator_addrs:
+            self.ledger.set_stake(validator, self.get_validator_stake(validator))
+
         block = Block(
             header=header,
             transactions=[tx.to_tachyon_transaction() for tx in included],
