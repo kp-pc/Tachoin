@@ -3,6 +3,36 @@
 All notable changes to Tachoin are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-22
+
+Documentation release that also fixes a broken public API entry point.
+
+### Fixed
+
+- **`TachoinClient.stake()` and `TachoinClient.unstake()` raised
+  `TransactionError: recipient is not a valid tachoin address` on every call.**
+  `_submit` forwarded extra positional arguments after `nonce, slot`, while
+  `TachoinTx.build_stake` and `build_unstake` expect `validator` third, so the
+  integer nonce was validated as an address and the real validator was
+  silently misplaced. Both methods now build their transaction explicitly, in
+  the same shape as `transfer`. Reported by the new client-level tests.
+- **`Transctions` typo** in the 1.0.0 changelog entry.
+
+### Added
+
+- Seven client-level regression tests covering `stake`, `unstake`, delegation to
+  an explicit validator, nonce advancement across every program, rollback of a
+  failed client call, and invariants after a mixed client workload. The suite is
+  now 66 tests; the 1.0.0 suite only called the transaction builders directly,
+  which is why the broken client path shipped.
+
+### Changed
+
+- README rewritten around copy-pasteable examples. Every command, flag, and
+  code snippet in it was executed against this release before publishing; two
+  documentation errors were caught that way (`create-wallet` has no
+  `--validators` flag, and the `run` output listing was incomplete).
+
 ## [1.0.0] - 2026-10-22
 
 First official package release.
@@ -35,7 +65,7 @@ First official package release.
   addresses while wallets signed with `tach…` addresses, so every transfer from
   a funded account failed with "insufficient balance". All state is now keyed by
   the `tach` address, derived from the same seed.
-- **Replayable transactions.** Transctions carried no nonce, so the same signed
+- **Replayable transactions.** Transactions carried no nonce, so the same signed
   bytes could be applied repeatedly. Nonces are now signed and enforced.
 - **Double-applied transactions.** Accepted transactions were executed on
   submission *and* again at block production. Execution now happens exactly
@@ -66,3 +96,4 @@ First official package release.
 - Tampered signatures are rejected before any state change.
 
 [1.0.0]: https://github.com/kp-pc/Tachoin/releases/tag/v1.0.0
+[1.0.1]: https://github.com/kp-pc/Tachoin/releases/tag/v1.0.1

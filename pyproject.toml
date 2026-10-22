@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tachoin"
-version = "1.0.0"
+version = "1.0.1"
 description = "Tachoin (TACH): a cryptocurrency with Ed25519 wallets, nonce-safe transactions and staking, built on the Tachyon blockchain"
 readme = "README.md"
 requires-python = ">=3.10"

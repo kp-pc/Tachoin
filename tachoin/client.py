@@ -117,16 +117,24 @@ class TachoinClient:
     def stake(
         self, wallet: TachoinWallet, amount: str, validator: Optional[str] = None
     ):
-        return self._submit(
-            TachoinTx.build_stake, wallet, amount, validator or wallet.address
+        units = parse_tach(amount)
+        nonce = self._node.get_nonce(wallet.address)
+        slot = self._node.get_current_slot() + 1
+        tx = TachoinTx.build_stake(
+            wallet, units, validator or wallet.address, nonce, slot
         )
+        return _result_dict(self._node.submit_transaction(tx))
 
     def unstake(
         self, wallet: TachoinWallet, amount: str, validator: Optional[str] = None
     ):
-        return self._submit(
-            TachoinTx.build_unstake, wallet, amount, validator or wallet.address
+        units = parse_tach(amount)
+        nonce = self._node.get_nonce(wallet.address)
+        slot = self._node.get_current_slot() + 1
+        tx = TachoinTx.build_unstake(
+            wallet, units, validator or wallet.address, nonce, slot
         )
+        return _result_dict(self._node.submit_transaction(tx))
 
     # ---- Blocks -------------------------------------------------------
 

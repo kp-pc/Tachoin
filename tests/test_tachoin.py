@@ -502,6 +502,80 @@ class TransactionSerializationTests(unittest.TestCase):
             encode_transfer(self.recipient, -1)
 
 
+class ClientTests(unittest.TestCase):
+    """The convenience client must pass arguments in each builder's order.
+
+    The suite previously only called ``TachoinTx.build_stake`` directly, which
+    hid a real bug: ``TachoinClient._submit`` forwarded ``*extra`` after
+    ``nonce, slot`` while ``build_stake`` expects ``validator`` third, so the
+    integer nonce landed in the validator slot and every ``client.stake()``
+    raised ``TransactionError``.
+    """
+
+    def setUp(self):
+        from tachoin.client import TachoinClient
+
+        self.client = TachoinClient(num_validators=4)
+        self.sender, self.other = self.client.validator_wallets()[:2]
+
+    def test_stake_defaults_to_own_address(self):
+        result = self.client.stake(self.sender, "100")
+        self.assertTrue(result["success"], result["error"])
+        self.assertEqual(result["nonce"], 0)
+        self.assertEqual(self.client.node.get_stake(self.sender.address), 100 * ONE_TACH)
+
+    def test_stake_to_explicit_validator(self):
+        baseline = self.client.node.ledger.get_stake(self.other.address)
+        result = self.client.stake(self.sender, "50", self.other.address)
+        self.assertTrue(result["success"], result["error"])
+        # The staker keeps the token bucket; the validator gets the delegation.
+        self.assertEqual(self.client.node.get_stake(self.sender.address), 50 * ONE_TACH)
+        self.assertEqual(
+            self.client.node.ledger.get_stake(self.other.address),
+            baseline + 50 * ONE_TACH,
+        )
+
+    def test_unstake_returns_balance(self):
+        self.assertTrue(self.client.stake(self.sender, "100")["success"])
+        result = self.client.unstake(self.sender, "40")
+        self.assertTrue(result["success"], result["error"])
+        self.assertEqual(self.client.node.get_stake(self.sender.address), 60 * ONE_TACH)
+
+    def test_unstake_to_explicit_validator(self):
+        baseline = self.client.node.ledger.get_stake(self.other.address)
+        self.assertTrue(self.client.stake(self.sender, "80", self.other.address)["success"])
+        self.assertEqual(
+            self.client.node.ledger.get_stake(self.other.address),
+            baseline + 80 * ONE_TACH,
+        )
+        result = self.client.unstake(self.sender, "30", self.other.address)
+        self.assertTrue(result["success"], result["error"])
+        self.assertEqual(self.client.node.get_stake(self.sender.address), 50 * ONE_TACH)
+        self.assertEqual(
+            self.client.node.ledger.get_stake(self.other.address),
+            baseline + 50 * ONE_TACH,
+        )
+
+    def test_client_nonces_advance_across_programs(self):
+        self.assertEqual(self.client.transfer(self.sender, self.other.address, "1")["nonce"], 0)
+        self.assertEqual(self.client.mint(self.sender, "2")["nonce"], 1)
+        self.assertEqual(self.client.stake(self.sender, "3")["nonce"], 2)
+        self.assertEqual(self.client.unstake(self.sender, "1")["nonce"], 3)
+
+    def test_failed_client_transaction_consumes_no_nonce(self):
+        failed = self.client.unstake(self.sender, "999999")
+        self.assertFalse(failed["success"])
+        self.assertEqual(self.client.node.get_nonce(self.sender.address), 0)
+
+    def test_client_keeps_invariants(self):
+        self.client.transfer(self.sender, self.other.address, "10")
+        self.client.stake(self.sender, "20")
+        self.client.mint(self.sender, "30")
+        self.client.burn(self.sender, "5")
+        self.assertTrue(self.client.node.check_supply_invariant())
+        self.assertTrue(self.client.node.check_balance_invariant())
+
+
 class PackageTests(unittest.TestCase):
     def test_version_is_release_shaped(self):
         parts = tachoin.__version__.split(".")
