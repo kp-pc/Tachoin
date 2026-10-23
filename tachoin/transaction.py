@@ -27,8 +27,8 @@ from .transaction_schemas import (
     PROGRAM_STAKE,
     PROGRAM_UNSTAKE,
     validate_payload_schema,
-    TransactionError,
 )
+from .exceptions import TransactionError
 
 #: Program identifiers.  Tachyon sees them as ``tachoin_<program>``.
 PROGRAM_TRANSFER = "transfer"
@@ -42,10 +42,6 @@ PROGRAMS = frozenset(
 )
 
 TACHYON_PROGRAM_PREFIX = "tachoin_"
-
-
-class TransactionError(ValueError):
-    """Raised when a transaction payload cannot be built or decoded."""
 
 
 def _encode(**fields: Any) -> bytes:
